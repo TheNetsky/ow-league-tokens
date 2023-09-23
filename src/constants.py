@@ -3,10 +3,11 @@ from pathlib import Path
 from colorama import Fore
 
 
-CURRENT_VERSION = '2.0.5'
+CURRENT_VERSION = '2.0.6'
 UPDATE_DOWNLOAD_URL = 'https://github.com/ucarno/ow-league-tokens/releases/latest'
 DISCORD_URL = 'https://discord.gg/kkq2XY4cJM'
 ISSUES_URL = 'https://github.com/ucarno/ow-league-tokens/issues'
+FAKE_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'
 
 DEBUG_ENVIRON = 'OW_LEAGUE_TOKENS_DEBUG'
 NOWAIT_ENVIRON = 'OW_LEAGUE_TOKENS_NOWAIT'
@@ -22,7 +23,8 @@ OWL_CHANNEL_ID = 'UCiAInBL9kUzz1XRxk66v-gw'
 # OWL_CHANNEL_ID = TEST_CHANNEL_ID
 OWC_CHANNEL_ID = 'UCWPW0pjx6gncOEnTW8kYzrg'
 
-TMPL_LIVE_STREAM_EMBED_URL = 'https://www.youtube.com/embed/live_stream?channel=%s'
+SCHEDULE_URL = 'https://overwatchleague.com/en-us/schedule'
+
 TMPL_LIVE_STREAM_URL = 'https://www.youtube.com/watch?v=%s'
 
 VERSION_CHECK_URL = 'https://raw.githubusercontent.com/ucarno/ow-league-tokens/main/version.txt'
@@ -32,11 +34,6 @@ YOUTUBE_LOGIN_URL = 'https://accounts.google.com/ServiceLogin?service=youtube&co
 
 YOUTUBE_AUTH_PASS = 'https://www.youtube.com'
 YOUTUBE_AUTH_FAIL = 'https://accounts.google.com'
-
-YOUTUBE_AUTH_PASS_RE = YOUTUBE_AUTH_PASS.replace('/', r'\/')
-YOUTUBE_AUTH_FAIL_RE = YOUTUBE_AUTH_FAIL.replace('/', r'\/')
-YOUTUBE_AUTH_ANY_RE = f'^({YOUTUBE_AUTH_PASS_RE}|{YOUTUBE_AUTH_FAIL_RE})'
-YOUTUBE_AUTH_PASS_RE = '^' + YOUTUBE_AUTH_PASS_RE
 
 NEW_TAB_URL = 'chrome://new-tab-page/'
 STREAM_CHECK_FREQUENCY = 300  # seconds

@@ -4,16 +4,33 @@ import os
 import subprocess
 import sys
 import traceback
-from datetime import datetime
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 from time import sleep
+import undetected_chromedriver as uc
+from selenium.webdriver.common.by import By
+from selenium.common.exceptions import NoSuchElementException, TimeoutException
+import selenium.webdriver.support.expected_conditions as EC
 
 import requests
 
-from constants import TMPL_LIVE_STREAM_EMBED_URL, COLORS, TMPL_LIVE_STREAM_URL, VERSION_CHECK_URL, PATH_DEBUG, \
-    CURRENT_VERSION, VERSION_ENVIRON, DEBUG_ENVIRON, PATH_CONFIG, UPDATE_DOWNLOAD_URL, NOWAIT_ENVIRON, \
-    DEFAULT_CHROMIUM_FLAGS, PATH_STATS
-
+from constants import (
+    COLORS,
+    TMPL_LIVE_STREAM_URL,
+    VERSION_CHECK_URL,
+    PATH_DEBUG,
+    CURRENT_VERSION,
+    DEBUG_ENVIRON,
+    PATH_CONFIG,
+    UPDATE_DOWNLOAD_URL,
+    NOWAIT_ENVIRON,
+    DEFAULT_CHROMIUM_FLAGS,
+    PATH_STATS,
+    SCHEDULE_URL,
+    FAKE_USER_AGENT,
+    NEW_TAB_URL,
+)
 
 def get_version(version: str) -> tuple:
     return tuple(map(int, (version.split("."))))
@@ -34,6 +51,8 @@ def get_default_config() -> dict:
         'headless': False,
         'shut_down': False,
         'debug': False,
+        'time_delta': False,
+        'schedule': False,
         'chromium_binary': None,
         'chromium_flags': DEFAULT_CHROMIUM_FLAGS,
     }
@@ -55,6 +74,9 @@ def load_config() -> dict:
 
             # v2.0.5
             'shut_down',
+
+            # v2.0.6
+            'schedule',
         ):
             if new_flag not in content:
                 update_config = True
@@ -142,50 +164,190 @@ def kill_headless_chromes(binary_path: str | None = None):
             log_debug(src, f'Failed killing Chrome process(es): {str(e)}')
 
 
-def get_active_stream(channel_id: str) -> str | None:
-    """Returns stream url if a channel with specified channel_id has active stream"""
-    src = 'LiveCheck'
+def make_get_request(url: str):
+    return requests.get(url, headers={'User-Agent': FAKE_USER_AGENT}, timeout=10)
 
+
+
+def url_starts_with(url: str):
+    """An expectation to check if the current url starts with a given url"""
+
+    def _predicate(driver):
+        return driver.current_url.startswith(url)
+
+    return _predicate
+
+
+def hide_chat(driver: uc.Chrome):
     try:
-        response = requests.get(TMPL_LIVE_STREAM_EMBED_URL % channel_id, timeout=10).text
-    except requests.RequestException as e:
-        log_error(src, f'&rLive stream check failed: {str(e)}')
-        tb = traceback.format_exc()
-        make_debug_file('failed-getting-active-stream', tb)
-        return
+        chat_frame = driver.wait(seconds=5).until(
+            EC.visibility_of_element_located((By.TAG_NAME, "ytd-live-chat-frame"))
+        )
 
+        if chat_frame.get_dom_attribute("collapsed") is None:
+            button = driver.wait().until(
+                EC.element_to_be_clickable((By.ID, "show-hide-button"))
+            )
+            button_text = button.text
+            button.click()
+            log_info("Bot", f"Clicked on '{button_text}' to hide chat window")
+    except (TimeoutException, NoSuchElementException):
+        pass
+
+
+def check_rewards(driver: uc.Chrome):
     try:
-        response_data = json.loads(response.split('ytcfg.set(')[1].split(');window.ytcfg.obfuscatedData_')[0])
-    except (IndexError, json.JSONDecodeError) as e:
-        log_error(src, '&rFailed parsing live stream data from YouTube embed...')
-        make_debug_file('livecheck_parsing', response)
-        return
+        account_link = driver.wait(seconds=5).until(
+            EC.visibility_of_element_located(
+                (By.TAG_NAME, "ytd-account-link-button-renderer")
+            )
+        )
 
-    try:
-        player_data = response_data['PLAYER_VARS']
-    except KeyError:
-        log_error(src, 'Could not access "PLAYER_VARS". Trying to get ID using another method...')
+        # c is the curve command in svg. The check mark indicating token rewards is shown in a circle, so we must be getting rewards if the svg has curves
+        svg_path = (
+            account_link.find_element(By.CSS_SELECTOR, "svg>path")
+            .get_attribute("d")
+            .lower()
+        )
+        has_rewards = "c" in svg_path
+        is_connected = account_link.text.strip() == "Connected"
+        log_info(
+            "Bot",
+            f"Your account is{'' if is_connected else ' not'} connected and{'' if has_rewards else ' not'} earning rewards",
+        )
+    except (TimeoutException, NoSuchElementException):
+        pass
 
-        make_debug_file('livecheck_status', json.dumps(response_data))
 
+def wait_for_tab(driver: uc.Chrome, tab_name: str, *args):
+    args = "".join(args)
+    return driver.wait().until(
+        EC.presence_of_element_located(
+            (By.XPATH, f'//tp-yt-paper-tab[contains(.,"{tab_name}")]{args}')
+        )
+    )
+
+
+def videos_tab(driver: uc.Chrome):
+    """click on Videos tab which contains encore streams"""
+    tab = wait_for_tab(driver, "Videos")
+    log_debug("Bot", "videos tab found")
+    if tab.get_attribute("aria-selected") != "true":
+        tab.click()
+        wait_for_tab(driver, "Videos", '[@aria-selected="true"]')
+
+
+def home_tab(driver: uc.Chrome):
+    """wait until Home tab is selected"""
+    wait_for_tab(driver, "Home", '[@aria-selected="true"]')
+    log_debug("Bot", "on home tab now")
+
+
+def find_live_video_url(driver: uc.Chrome):
+    for open_tab in [home_tab, videos_tab]:
+        open_tab(driver)
         try:
-            video_id = response_data['VIDEO_ID']
-            log_info(src, 'Got video ID using another method! '
-                          'But not sure whether it is a live stream or just video...')
-            return TMPL_LIVE_STREAM_URL % video_id
-        except KeyError:
-            log_error(src, 'Could not get live stream video id.')
-            return
+            el = driver.wait().until(
+                EC.presence_of_element_located(
+                    (
+                        By.CSS_SELECTOR,
+                        "ytd-thumbnail[loaded]>a:has(div .ytd-thumbnail:is([overlay-style=LIVE]))",
+                    )
+                )
+            )
+            stream_url = el.get_attribute("href")
+            log_debug("LiveCheck", f"found stream: {stream_url}")
+            return stream_url
+        except (TimeoutException, NoSuchElementException):
+            pass
+
+    log_info("LiveCheck", "stream not live")
+
+
+def get_active_stream(channel_id: str, driver: uc.Chrome | None = None) -> str | None:
+    """Returns stream url if a channel with specified channel_id has active stream"""
+    src = "LiveCheck"
+
+    check_url = "https://www.youtube.com/channel/%s" % channel_id
 
     try:
-        video_id = player_data['video_id']
-        embedded_player_response = json.loads(player_data['embedded_player_response'])
+        if driver:
+            log_debug(src, "Checking stream status using WebDriver...")
+            driver.get(check_url)
+            if "consent.youtube.com" in driver.current_url:
+                log_debug(src, "YouTube asked for consent")
+                try:
+                    element = driver.find_element(
+                        By.XPATH, '//form[@action="https://consent.youtube.com/save"]'
+                    )
+                    element.click()
+                except:
+                    log_error(src, "Failed to get stream status using driver!")
+                    return
 
-        if embedded_player_response['previewPlayabilityStatus']['status'] == 'OK':
-            return TMPL_LIVE_STREAM_URL % video_id
-    except KeyError as e:
-        log_error(src, f'Could not get stream status: {str(e)}.')
-        make_debug_file('livecheck_general', traceback.format_exc() + '\n\n' + json.dumps(player_data))
+            driver.wait().until(
+                url_starts_with("https://www.youtube.com/")
+            )
+            stream_url = find_live_video_url(driver)
+            driver.get(NEW_TAB_URL)
+            return stream_url
+
+        if not driver:
+            log_debug(src, "Checking stream status using 'requests'...")
+            response = make_get_request(check_url).text
+
+            matches = re.search(r"/([\w-]+)/hqdefault_live.jpg", response)
+            if matches is not None and len(matches.groups()) > 0:
+                video_id = matches.group(1)
+                return TMPL_LIVE_STREAM_URL % video_id
+
+    except Exception as e:
+        log_error(src, f"&rLive stream check failed: {str(e)}")
+        make_debug_file("failed-getting-active-stream", traceback.format_exc())
+        return
+
+
+
+def get_seconds_till_next_match() -> float | None:
+    src = 'Schedule'
+
+    try:
+        # getting page json
+        schedule_html = make_get_request(SCHEDULE_URL).text
+        next_data = (
+            schedule_html
+            .split('<script id="__NEXT_DATA__" type="application/json">')[1]
+            .split('</script>')[0].strip()
+        )
+        schedule_json = json.loads(next_data)
+
+        # getting matches
+        blocks = schedule_json['props']['pageProps']['blocks']
+        matches: list = []
+        for block in blocks:
+            if 'owlHeader' in block.keys():
+                matches = block['owlHeader']['scoreStripList']['scoreStrip']['matches']
+                break
+
+        if not matches:
+            raise Exception('Could not get matches.')
+
+        pending_matches = list(filter(lambda match: match.get('status') == 'PENDING', matches))
+        pending_matches.sort(key=lambda match: match['date']['startDate'])
+
+        if not pending_matches:
+            raise Exception(f"No matches with status 'PENDING'.")
+
+        timestamp_ms = pending_matches[0]['date']['startDate']
+        delta = datetime.fromtimestamp(timestamp_ms / 1000, timezone.utc) - datetime.now(timezone.utc)
+        total_seconds = delta.total_seconds()
+
+        log_info(src, f'Closest match will be played in {delta}.')
+
+        return total_seconds
+    except Exception as e:
+        log_error(src, f'&rSchedule check failed: {str(e)}. Falling back to regular checks.')
+        make_debug_file('failed-getting-schedule', traceback.format_exc())
 
 
 def check_for_new_version():
